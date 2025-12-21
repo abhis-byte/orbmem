@@ -1,8 +1,7 @@
-# core/auth.py
-
 from fastapi import Request
 from datetime import datetime, timezone
 import hashlib
+import os
 
 from orbmem.utils.exceptions import AuthError
 from orbmem.core.config import load_config
@@ -10,7 +9,7 @@ from orbmem.db.api_keys import get_api_key_record
 
 
 # =================================================
-# FIREBASE (lazy init)
+# FIREBASE (ENV BASED, SAFE)
 # =================================================
 
 _firebase_initialized = False
@@ -24,13 +23,22 @@ def _init_firebase():
     try:
         import firebase_admin
         from firebase_admin import credentials
-        import os
 
-        cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT")
-        if not cred_path:
-            raise AuthError("FIREBASE_SERVICE_ACCOUNT not configured")
+        project_id = os.getenv("FIREBASE_PROJECT_ID")
+        private_key = os.getenv("FIREBASE_PRIVATE_KEY")
+        client_email = os.getenv("FIREBASE_CLIENT_EMAIL")
 
-        cred = credentials.Certificate(cred_path)
+        if not project_id or not private_key or not client_email:
+            raise AuthError("Firebase ENV variables not configured")
+
+        cred = credentials.Certificate({
+            "type": "service_account",
+            "project_id": project_id,
+            "private_key": private_key.replace("\\n", "\n"),
+            "client_email": client_email,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+
         firebase_admin.initialize_app(cred)
         _firebase_initialized = True
 
@@ -39,6 +47,9 @@ def _init_firebase():
 
 
 def _verify_firebase_token(id_token: str) -> dict:
+    """
+    Verifies Firebase ID token and returns user dict
+    """
     try:
         _init_firebase()
         from firebase_admin import auth
@@ -75,7 +86,6 @@ def validate_request(request: Request) -> dict:
     CLOUD MODE:
         - Firebase token required (X-Firebase-Token)
         - API key required (Authorization: Bearer <API_KEY>)
-        - API key validated from DB
     """
 
     cfg = load_config()
@@ -144,7 +154,5 @@ def validate_request(request: Request) -> dict:
         "is_unlimited": record["is_unlimited"],
     }
 
-    # attach for middleware (usage tracking)
     request.state.auth = auth_ctx
-
     return auth_ctx
