@@ -1,5 +1,8 @@
 # API/server.py
 
+from dotenv import load_dotenv
+load_dotenv()   # 🔥 THIS IS THE FIX
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -8,6 +11,7 @@ from orbmem.API.middleware import setup_middleware
 from orbmem.API.routes.ocdb_routes import router as ocdb_router
 from orbmem.API.routes.api_keys_routes import router as api_keys_router
 from orbmem.API.routes.payment_routes import router as payment_router
+from orbmem.API.routes.webhook_routes import router as webhook_router
 from orbmem.utils.logger import get_logger
 from orbmem.utils.exceptions import (
     OCDBError,
@@ -48,7 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(ocdb_router)
     app.include_router(api_keys_router)
     app.include_router(payment_router)
-
+    app.include_router(webhook_router)
     logger.info("API routes registered successfully.")
 
 

@@ -88,9 +88,13 @@ def verify_payment(
     x_firebase_token: str = Header(..., alias="X-Firebase-Token"),
 ):
     """
-    Verifies Razorpay payment and issues API key.
+    Verify Razorpay payment (idempotent, atomic).
+    Safe for frontend; webhook may also process same payment.
     """
 
+    # --------------------------------------------------
+    # AUTH
+    # --------------------------------------------------
     user = _verify_firebase_token(x_firebase_token)
     uid = user["uid"]
 
@@ -101,49 +105,145 @@ def verify_payment(
     if not payment_id or not order_id or not signature:
         raise HTTPException(status_code=400, detail="Missing payment fields")
 
-    # -----------------------------
-    # VERIFY RAZORPAY SIGNATURE
-    # -----------------------------
+    # --------------------------------------------------
+    # VERIFY SIGNATURE
+    # --------------------------------------------------
     try:
         razorpay_client.utility.verify_payment_signature({
             "razorpay_payment_id": payment_id,
             "razorpay_order_id": order_id,
             "razorpay_signature": signature,
         })
-    except Exception as e:
-        print("Signature verification failed:", e)
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid payment signature")
 
-    db = SessionLocal()
-
+    # --------------------------------------------------
+    # FETCH ORDER (DO NOT TRUST CLIENT)
+    # --------------------------------------------------
     try:
-        # -----------------------------
-        # DISABLE OLD API KEYS
-        # -----------------------------
+        order = razorpay_client.order.fetch(order_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Order fetch failed")
+
+    notes = order.get("notes", {})
+
+    if notes.get("uid") != uid:
+        raise HTTPException(status_code=403, detail="Order/User mismatch")
+
+    # 🔒 Normalize plan to avoid case issues
+    plan = notes.get("plan", "paid").lower()
+
+    # --------------------------------------------------
+    # ATOMIC DATABASE TRANSACTION
+    # --------------------------------------------------
+    db = SessionLocal()
+    try:
+        # 1️⃣ IDEMPOTENCY CHECK
+        already_processed = db.execute(
+            text("""
+                SELECT 1
+                FROM payments
+                WHERE razorpay_payment_id = :pid
+                LIMIT 1
+            """),
+            {"pid": payment_id}
+        ).fetchone()
+
+        if already_processed:
+            return {
+                "status": "ok",
+                "message": "Payment already processed"
+            }
+
+        # 2️⃣ RECORD PAYMENT (LOCKS PAYMENT ID)
         db.execute(
-            text("UPDATE api_keys SET is_active = FALSE WHERE user_id = :uid"),
+            text("""
+                INSERT INTO payments (
+                    user_id,
+                    razorpay_payment_id,
+                    order_id,
+                    amount,
+                    plan
+                )
+                VALUES (:uid, :pid, :oid, :amt, :plan)
+            """),
+            {
+                "uid": uid,
+                "pid": payment_id,
+                "oid": order_id,
+                "amt": order["amount"],
+                "plan": plan,
+            }
+        )
+
+        # 3️⃣ REVOKE OLD KEYS
+        db.execute(
+            text("""
+                UPDATE api_keys
+                SET is_active = FALSE
+                WHERE user_id = :uid
+            """),
             {"uid": uid}
         )
-        db.commit()
 
-        # -----------------------------
-        # CREATE NEW API KEY
-        # -----------------------------
-        raw_key = create_api_key(
-            user_id=uid,
-            plan="paid",
-            is_unlimited=True
+        # 4️⃣ CREATE NEW API KEY (INLINE, SAME SESSION)
+        from orbmem.db.api_keys import generate_api_key
+
+        raw_key, key_hash = generate_api_key()
+
+        db.execute(
+            text("""
+                INSERT INTO api_keys (
+                    user_id,
+                    api_key_hash,
+                    is_active,
+                    is_unlimited,
+                    expires_at,
+                    plan
+                )
+                VALUES (
+                    :uid,
+                    :hash,
+                    TRUE,
+                    TRUE,
+                    NULL,
+                    :plan
+                )
+            """),
+            {
+                "uid": uid,
+                "hash": key_hash,
+                "plan": plan,
+            }
         )
+
+        # 🧾 PRODUCTION LOG (CRITICAL)
+        from orbmem.utils.logger import get_logger
+        logger = get_logger(__name__)
+        logger.info(
+            "Payment verified and API key issued",
+            extra={
+                "uid": uid,
+                "payment_id": payment_id,
+                "order_id": order_id,
+                "plan": plan,
+            }
+        )
+
+        # ✅ SINGLE COMMIT (NO GHOST KEYS)
+        db.commit()
 
         return {
             "api_key": raw_key,
-            "message": "Payment successful. API key generated.",
+            "message": "Payment verified. API key issued."
         }
 
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print("DB error:", e)
-        raise DatabaseError("Failed to finalize payment")
+        raise HTTPException(
+            status_code=500,
+            detail="Payment finalization failed"
+        )
 
     finally:
         db.close()

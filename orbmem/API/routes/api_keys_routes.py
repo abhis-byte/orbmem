@@ -67,16 +67,12 @@ def create_first_key(x_firebase_token: str = Header(...)):
 # REGENERATE API KEY (REVOKE OLD → CREATE NEW)
 # =================================================
 @router.post("/regenerate")
-def regenerate_key(user: dict = Depends(require_auth)):
-    """
-    Revoke ALL existing keys and generate a NEW one.
-    """
-
+def regenerate_key(x_firebase_token: str = Header(...)):
+    user = _verify_firebase_token(x_firebase_token)
     uid = user["uid"]
     db = SessionLocal()
 
     try:
-        # 1️⃣ Revoke all existing keys
         db.execute(
             text("""
                 UPDATE api_keys
@@ -86,7 +82,6 @@ def regenerate_key(user: dict = Depends(require_auth)):
             {"uid": uid}
         )
 
-        # 2️⃣ Create new key
         raw_key = create_api_key(
             user_id=uid,
             plan="test",
@@ -106,7 +101,6 @@ def regenerate_key(user: dict = Depends(require_auth)):
 
     finally:
         db.close()
-
 
 # =================================================
 # LIST MY API KEYS (MASKED)
@@ -159,6 +153,40 @@ def list_my_keys(x_firebase_token: str = Header(...)):
 
     except Exception as e:
         raise DatabaseError(f"Failed to fetch API keys: {e}")
+
+    finally:
+        db.close()
+
+# =================================================
+# REVOKE API KEY (NO REGENERATION)
+# =================================================
+@router.post("/revoke")
+def revoke_key(x_firebase_token: str = Header(...)):
+    user = _verify_firebase_token(x_firebase_token)
+    uid = user["uid"]
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("""
+                UPDATE api_keys
+                SET is_active = FALSE
+                WHERE user_id = :uid
+                  AND is_active = TRUE
+            """),
+            {"uid": uid}
+        )
+
+        if result.rowcount == 0:
+            raise AuthError("No active API key to revoke.")
+
+        db.commit()
+
+        return {"message": "API key revoked successfully."}
+
+    except Exception as e:
+        db.rollback()
+        raise DatabaseError(f"Failed to revoke API key: {e}")
 
     finally:
         db.close()

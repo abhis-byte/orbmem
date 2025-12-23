@@ -9,7 +9,7 @@ from orbmem.core.config import load_config
 from orbmem.engines.memory.postgres_backend import PostgresMemoryBackend
 
 # VECTOR ENGINE (FAISS-based)
-from orbmem.engines.vector.FIASS_backend import QdrantVectorBackend
+from orbmem.engines.vector.FAISS_backend import QdrantVectorBackend
 
 # GRAPH ENGINE
 from orbmem.engines.graph.neo4j_backend import Neo4jGraphBackend
