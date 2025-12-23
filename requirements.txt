@@ -7,3 +7,4 @@ firebase-admin
 razorpay
 faiss-cpu
 networkx
+python-dotenv
